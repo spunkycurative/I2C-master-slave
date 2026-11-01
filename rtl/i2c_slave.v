@@ -1,291 +1,413 @@
-// ================= SLAVE ===================
-`timescale 1ns/1ps
+
+// ============================================================
+// I2C SLAVE
+// ============================================================
 
 module i2c_slave(
-  input        scl,
-  input        clk,
-  input        rst,
-  inout        sda,
-  output reg   ack_err,
-  output reg   done
+
+    input        clk,
+    input        rst,
+
+    input        scl,
+    inout        sda,
+
+    output reg   ack_err,
+    output reg   done
 );
 
-  // fix enum name: idle (not ideal)
-  typedef enum logic [3:0] {
-    idle = 0,
-    read_addr = 1,
-    send_ack = 2,
-    send_data = 3,
-    master_ack = 4,
-    read_data = 5,
-    send_ack2 = 6,
-    wait_p = 7,
-    detect_stop = 8
-  } state_type;
-  state_type state = idle;
+    // --------------------------------------------------------
+    // Memory
+    // --------------------------------------------------------
 
-  reg [7:0] mem [0:127]; // slave memory
-  reg [7:0] r_addr;      // register pointer (address)
-  reg [6:0] addr;        // slave address to match
-  reg       r_mem = 0;   // read enable (master reading from slave)
-  reg       w_mem = 0;   // write enable (master writing to slave)
-  reg [7:0] dout;        // data out from slave to master
-  reg [7:0] din;         // data in from master to slave
-  reg sda_t;             // value to drive sda
-  reg sda_en;            // controls sda driving
-  reg [3:0] bitcnt = 0;  // counts bits 0-7
+    reg [7:0] mem [0:127];
 
-  // initialize memory and variables
-  always @(posedge clk) begin
-    if (rst) begin
-      integer i;
-      for (i = 0; i < 128; i = i + 1)
-        mem[i] = i;
-      dout <= 8'h00;
-    end else begin
-      if (r_mem == 1'b1) begin
-        dout <= mem[addr];
-      end else if (w_mem == 1'b1) begin
-        mem[addr] <= din;
-      end
+    integer i;
+
+    // --------------------------------------------------------
+    // Internal registers
+    // --------------------------------------------------------
+
+    reg [7:0] rx_data;
+    reg [7:0] tx_data;
+
+    reg [6:0] addr;
+
+    reg       rw;
+
+    reg [3:0] bitcnt;
+
+    reg       sda_t;
+    reg       sda_en;
+
+    reg       busy;
+
+    // --------------------------------------------------------
+    // Previous SCL/SDA
+    // --------------------------------------------------------
+
+    reg scl_prev;
+    reg sda_prev;
+
+    wire rising_scl;
+    wire falling_scl;
+
+    assign rising_scl  = (~scl_prev) & scl;
+    assign falling_scl = scl_prev & (~scl);
+
+    // START:
+    // SDA HIGH -> LOW while SCL HIGH
+
+    wire start_condition;
+
+    assign start_condition =
+        sda_prev & (~sda) & scl;
+
+    // STOP:
+    // SDA LOW -> HIGH while SCL HIGH
+
+    wire stop_condition;
+
+    assign stop_condition =
+        (~sda_prev) & sda & scl;
+
+    // --------------------------------------------------------
+    // Open drain SDA
+    // --------------------------------------------------------
+
+    assign sda =
+        (sda_en && !sda_t) ?
+        1'b0 :
+        1'bz;
+
+
+    // ========================================================
+    // Memory initialization
+    // ========================================================
+
+    always @(posedge clk or posedge rst) begin
+
+        if (rst) begin
+
+            for (i = 0; i < 128; i = i + 1)
+                mem[i] <= i;
+
+        end
     end
-  end
 
-  parameter sys_freq = 40000000;
-  parameter i2c_freq = 100000;
 
-  parameter clk_count4 = sys_freq / i2c_freq;
-  parameter clk_count1 = clk_count4 / 4;
-  integer count1 = 0;
-  reg i2c_clk = 0;
+    // ========================================================
+    // Previous bus values
+    // ========================================================
 
-  reg [1:0] pulse = 0;
-  reg busy;
+    always @(posedge clk or posedge rst) begin
 
-  // pulse generator for slave
-  always @(posedge clk or posedge rst) begin
-    if (rst) begin
-      pulse <= 0;
-      count1 <= 0;
-    end else if (busy == 1'b0) begin
-      pulse <= 2;
-      count1 <= 202;
-    end else if (count1 == clk_count1 - 1) begin
-      pulse <= 1;
-      count1 <= count1 + 1;
-    end else if (count1 == clk_count1 * 2 - 1) begin
-      pulse <= 2;
-      count1 <= count1 + 1;
-    end else if (count1 == clk_count1 * 3 - 1) begin
-      pulse <= 3;
-      count1 <= count1 + 1;
-    end else if (count1 == clk_count1 * 4 - 1) begin
-      pulse <= 0;
-      count1 <= 0;
-    end else begin
-      count1 <= count1 + 1;
+        if (rst) begin
+
+            scl_prev <= 1'b0;
+            sda_prev <= 1'b1;
+
+        end
+
+        else begin
+
+            scl_prev <= scl;
+            sda_prev <= sda;
+
+        end
     end
-  end
 
-  // detect start: falling edge of SDA while SCL high
-  reg scl_t;
-  wire start;
-  always @(posedge clk) begin
-    scl_t <= scl;
-  end
-  assign start = (~scl) & scl_t;
 
-  reg r_ack;
+    // ========================================================
+    // Slave FSM
+    // ========================================================
 
-  always @(posedge clk or posedge rst) begin
-    if (rst) begin
-      bitcnt <= 0;
-      state <= idle;
-      r_addr <= 7'b0000000;
-      sda_en <= 1'b0;
-      sda_t <= 1'b0;
-      addr <= 0;
-      r_mem <= 0;
-      din <= 8'h00;
-      ack_err <= 0;
-      done <= 1'b0;
-      busy <= 1'b0;
-      r_ack <= 1'b1;
-      dout <= 8'h00;
-      w_mem <= 1'b0;
-    end else begin
-      case (state)
-        idle: begin
-          if (scl == 1'b1 && sda == 1'b0) begin
-            busy <= 1'b1;
-            state <= wait_p;
-          end else begin
-            state <= idle;
-          end
+    typedef enum logic [3:0] {
+
+        IDLE       = 4'd0,
+        READ_ADDR  = 4'd1,
+        SEND_ACK   = 4'd2,
+        READ_DATA  = 4'd3,
+        WRITE_MEM  = 4'd4,
+        SEND_ACK2  = 4'd5,
+        SEND_DATA  = 4'd6,
+        MASTER_ACK = 4'd7,
+        STOP       = 4'd8
+
+    } state_t;
+
+    state_t state;
+
+
+    // ========================================================
+    // Main FSM
+    // ========================================================
+
+    always @(posedge clk or posedge rst) begin
+
+        if (rst) begin
+
+            state    <= IDLE;
+
+            rx_data  <= 0;
+            tx_data  <= 0;
+
+            addr     <= 0;
+            rw       <= 0;
+
+            bitcnt   <= 0;
+
+            sda_t    <= 1'b1;
+            sda_en   <= 1'b0;
+
+            busy     <= 1'b0;
+            ack_err  <= 1'b0;
+            done     <= 1'b0;
         end
 
-        wait_p: begin
-          // wait until pulses align (use integer compare as you used in master)
-          if ((pulse == 2'b11) && (count1 == clk_count1 * 4 - 1)) begin
-            state <= read_addr;
-          end else begin
-            state <= wait_p;
-          end
-        end
+        else begin
 
-        // ---------- read address bits ----------
-        read_addr: begin
-          sda_en <= 1'b0; // listen
-          if (bitcnt <= 7) begin
-            case (pulse)
-              0: begin end
-              1: begin end
-              2: begin r_addr <= (count1 == (clk_count1 * 2)) ? {r_addr[6:0], sda} : r_addr; end
-              3: begin end
-            endcase
-            if (count1 == clk_count1 * 4 - 1) begin
-              state <= read_addr;
-              bitcnt <= bitcnt + 1;
-            end else begin
-              state <= read_addr;
+            case (state)
+
+
+            // =================================================
+            // IDLE
+            // =================================================
+
+            IDLE: begin
+
+                done   <= 1'b0;
+                sda_en <= 1'b0;
+                sda_t  <= 1'b1;
+
+                if (start_condition) begin
+
+                    busy   <= 1'b1;
+                    bitcnt <= 0;
+                    rx_data <= 0;
+
+                    state <= READ_ADDR;
+                end
             end
-          end else begin
-            state <= send_ack;
-            bitcnt <= 0;
-            sda_en <= 1'b1;
-            addr <= r_addr[7:1];
-          end
-        end
 
-        // ---------- send ack after address ----------
-        send_ack: begin
-          case (pulse)
-            0: begin sda_t <= 1'b0; end
-            1: begin end
-            2: begin end
-            3: begin end
-          endcase
-          if (count1 == clk_count1 * 4 - 1) begin
-            if (r_addr[0] == 1'b1) begin
-              // master wants to read -> slave will send data
-              state <= send_data;
-              r_mem <= 1'b1;
-            end else begin
-              // master wants to write -> slave will read data
-              state <= read_data;
-              r_mem <= 1'b0;
+
+            // =================================================
+            // RECEIVE 7-BIT ADDRESS + R/W
+            // =================================================
+
+            READ_ADDR: begin
+
+                sda_en <= 1'b0;
+
+                if (rising_scl) begin
+
+                    if (bitcnt < 4'd7) begin
+
+                        // First 7 bits = address
+                        addr <= {
+                            addr[5:0],
+                            sda
+                        };
+
+                        bitcnt <= bitcnt + 1'b1;
+                    end
+
+                    else begin
+
+                        // 8th bit = R/W
+                        rw <= sda;
+
+                        bitcnt <= 0;
+
+                        state <= SEND_ACK;
+                    end
+                end
             end
-          end else begin
-            state <= send_ack;
-          end
-        end
 
-        // ---------- read data from master (write from master's perspective) ----------
-        read_data: begin
-          sda_en <= 1'b0;
-          if (bitcnt <= 7) begin
-            case (pulse)
-              0: begin end
-              1: begin end
-              2: begin din <= (count1 == (clk_count1 * 2)) ? {din[6:0], sda} : din; end
-              3: begin end
-            endcase
-            if (count1 == clk_count1 * 4 - 1) begin
-              state <= read_data;
-              bitcnt <= bitcnt + 1;
-            end else begin
-              state <= read_data;
+
+            // =================================================
+            // SEND ADDRESS ACK
+            // =================================================
+
+            SEND_ACK: begin
+
+                // ACK = SDA LOW
+                sda_en <= 1'b1;
+                sda_t  <= 1'b0;
+
+                if (rising_scl) begin
+
+                    bitcnt <= 0;
+
+                    if (rw == 1'b0) begin
+
+                        // WRITE operation
+                        rx_data <= 0;
+
+                        state <= READ_DATA;
+                    end
+
+                    else begin
+
+                        // READ operation
+                        tx_data <= mem[addr];
+
+                        bitcnt <= 0;
+
+                        state <= SEND_DATA;
+                    end
+                end
             end
-          end else begin
-            state <= send_ack2;
-            bitcnt <= 0;
-            sda_en <= 1'b1;
-            w_mem <= 1'b1;
-          end
-        end
 
-        // ---------- send ACK after receiving data ----------
-        send_ack2: begin
-          case (pulse)
-            0: begin sda_t <= 1'b0; end
-            1: begin w_mem <= 1'b0; end
-            2: begin end
-            3: begin end
-          endcase
-          if (count1 == clk_count1 * 4 - 1) begin
-            state <= detect_stop;
-          end else begin
-            state <= send_ack2;
-          end
-        end
 
-        // ---------- send data to master (master read) ----------
-        send_data: begin
-          sda_en <= 1'b1; // drive SDA
-          if (bitcnt <= 7) begin
-            r_mem <= 1'b0;
-            case (pulse)
-              0: begin end
-              1: begin sda_t <= (count1 == (clk_count1)) ? dout[7 - bitcnt] : sda_t; end
-              2: begin end
-              3: begin end
-            endcase
-            if (count1 == clk_count1 * 4 - 1) begin
-              state <= send_data;
-              bitcnt <= bitcnt + 1;
-            end else begin
-              state <= send_data;
+            // =================================================
+            // RECEIVE DATA FROM MASTER
+            // =================================================
+
+            READ_DATA: begin
+
+                sda_en <= 1'b0;
+
+                if (rising_scl) begin
+
+                    rx_data <= {
+                        rx_data[6:0],
+                        sda
+                    };
+
+                    if (bitcnt == 4'd7) begin
+
+                        bitcnt <= 0;
+
+                        state <= WRITE_MEM;
+                    end
+
+                    else begin
+                        bitcnt <= bitcnt + 1'b1;
+                    end
+                end
             end
-          end else begin
-            state <= master_ack;
-            bitcnt <= 0;
-            sda_en <= 1'b0;
-          end
-        end
 
-        // ---------- master ack after slave sends data ----------
-        master_ack: begin
-          case (pulse)
-            0: begin end
-            1: begin end
-            2: begin r_ack <= (count1 == (clk_count1 * 2)) ? sda : r_ack; end
-            3: begin end
-          endcase
-          if (count1 == clk_count1 * 4 - 1) begin
-            if (r_ack == 1'b1) begin
-              // NACK (master not interested in more data)
-              ack_err <= 1'b0;
-              state <= detect_stop;
-              sda_en <= 1'b0;
-            end else begin
-              // ACK (master wants more) -> treat as not error but still proceed to detect stop
-              ack_err <= 1'b1;
-              state <= detect_stop;
-              sda_en <= 1'b0;
+
+            // =================================================
+            // WRITE DATA TO MEMORY
+            // =================================================
+
+            WRITE_MEM: begin
+
+                mem[addr] <= rx_data;
+
+                state <= SEND_ACK2;
             end
-          end else begin
-            state <= master_ack;
-          end
-        end
 
-        // ---------- detect STOP ----------
-        detect_stop: begin
-          if ((pulse == 2'b11) && (count1 == clk_count1 * 4 - 1)) begin
-            state <= idle;
-            busy <= 1'b0;
-            done <= 1'b1;
-          end else begin
-            state <= detect_stop;
-          end
-        end
 
-        default: state <= idle;
+            // =================================================
+            // SEND DATA ACK
+            // =================================================
 
-      endcase
+            SEND_ACK2: begin
+
+                sda_en <= 1'b1;
+                sda_t  <= 1'b0;
+
+                if (rising_scl) begin
+
+                    // Release SDA after ACK clock
+                    sda_en <= 1'b0;
+
+                    state <= STOP;
+                  
+                     $display("[SLAVE] READ ACK: ADDR=%0d MEM=%0d TIME=%0t",
+             addr, mem[addr], $time);
+                end
+            end
+
+
+        // =================================================
+// SEND DATA TO MASTER
+//
+// SDA changes ONLY when SCL LOW
+// =================================================
+
+SEND_DATA: begin
+
+    sda_en <= 1'b1;
+
+    if (falling_scl) begin
+    if (bitcnt < 4'd8) begin
+        sda_t <= tx_data[7-bitcnt];
+        sda_en <= 1'b1;
+
+        $display("[SLAVE] TX BIT=%0d VALUE=%0b TIME=%0t",
+                 bitcnt, tx_data[7-bitcnt], $time);
+
+        bitcnt <= bitcnt + 1'b1;
     end
-  end
+    else begin
+        sda_en <= 1'b0;
+        bitcnt <= 0;
+        state <= MASTER_ACK;
+    end
+end
+end
 
-  // I2C open-drain behavior
-  assign sda = (sda_en == 1'b1) ? sda_t : 1'bz;
+
+
+            // =================================================
+            // MASTER ACK / NACK
+            // =================================================
+
+            MASTER_ACK: begin
+
+                // Master owns SDA
+                sda_en <= 1'b0;
+
+                if (rising_scl) begin
+
+                    if (sda == 1'b1) begin
+
+                        // NACK
+                        state <= STOP;
+                    end
+
+                    else begin
+
+                        // ACK
+                        state <= SEND_DATA;
+                    end
+                end
+            end
+
+
+            // =================================================
+            // STOP
+            // =================================================
+
+            STOP: begin
+
+                sda_en <= 1'b0;
+
+                if (stop_condition) begin
+
+                    busy    <= 1'b0;
+                    done    <= 1'b1;
+                    ack_err <= 1'b0;
+
+                    bitcnt <= 0;
+
+                    state <= IDLE;
+                end
+            end
+
+
+            default: begin
+
+                state <= IDLE;
+                busy  <= 1'b0;
+
+            end
+
+            endcase
+        end
+    end
 
 endmodule
