@@ -1,77 +1,100 @@
+
 module tb;
-  generator gen;
-  driver drv;
-  monitor mon;
-  scoreboard sco;
-  
-  event nextgd;
-  event nextgs;
-  
-  mailbox #(transaction) mbxgd, mbxms;
-  
-  i2c_if vif();
-  i2c_top dut(vif.clk,vif.rst,vif.newd,vif.op,vif.addr,vif.din,vif.dout,vif.busy,vif.ack_err,vif.done);
-  
-  initial begin
-    vif.clk = 0; 
-    forever #5 vif.clk = ~vif.clk; // FIX: initialize clock
-  end
-  
-  initial begin
-    mbxgd=new();
-    mbxms=new();
-    
-    gen=new(mbxgd);
-    drv=new(mbxgd);
-    mon=new(mbxms);
-    sco=new(mbxms);
-    
-    gen.count=10;
-    
-    drv.vif=vif;
-    mon.vif=vif;
-    
-    gen.drvnext=nextgd;
-    drv.drvnext=nextgd;
-    gen.sconext=nextgs;
-    sco.sconext=nextgs;
-    
-    run();
-  end
-  
-  task pre_test();
-    drv.reset();
-  endtask
-  
-  task test();
-    fork
-      gen.run();
-      drv.run();
-      mon.run();
-      sco.run();
-    join_none
-  endtask
-  
-  task post_test();
-    wait(gen.done.triggered);
-    //$finish();
-  endtask
-    
-  task run();
-    pre_test();
-    test();
-    post_test();
-  endtask
-  
-  initial begin
-    $dumpfile("dump.vcd");
-    $dumpvars(0,tb);
-  end
-  
-   initial begin
-    #300;
-    $display("TIMEOUT");
-    $finish;
-  end
-  
+
+    i2c_if vif();
+
+
+    // ========================================================
+    // DUT
+    // ========================================================
+
+    i2c_top dut (
+
+        .clk(vif.clk),
+        .rst(vif.rst),
+
+        .newd(vif.newd),
+
+        .op(vif.op),
+
+        .din(vif.din),
+        .addr(vif.addr),
+
+        .dout(vif.dout),
+
+        .busy(vif.busy),
+        .ack_err(vif.ack_err),
+        .done(vif.done)
+
+    );
+  i2c_assertions sva(vif);
+
+
+    environment env;
+
+
+    // ========================================================
+    // Clock
+    // ========================================================
+
+    initial begin
+
+        vif.clk = 1'b0;
+
+        forever
+            #5 vif.clk = ~vif.clk;
+
+    end
+
+
+    // ========================================================
+    // Test
+    // ========================================================
+
+    initial begin
+
+        env = new(vif);
+
+        env.gen.count = 30;
+
+        env.run();
+
+        $display("");
+        $display("==============================================");
+        $display("           TEST COMPLETED");
+        $display("==============================================");
+
+        #100;
+
+        $finish;
+
+    end
+
+
+    // ========================================================
+    // Waveform
+    // ========================================================
+
+    initial begin
+
+        $dumpfile("dump.vcd");
+        $dumpvars(0,tb);
+
+    end
+
+
+    // ========================================================
+    // Timeout
+    // ========================================================
+
+    initial begin
+
+        #10_000_000;
+
+        $error("TIMEOUT");
+
+        $finish;
+
+    end
+
 endmodule
