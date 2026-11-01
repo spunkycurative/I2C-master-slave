@@ -246,9 +246,8 @@ Waveforms are analyzed to understand the complete transaction sequence, verify S
 - SystemVerilog Assertions (SVA)
 - Functional Coverage
 - EDA Playground
-- Riviera-PRO
+- Siemens Questa 2025.2
 - VCD Waveform Analysis
-- Git and GitHub
 
 ## Repository Structure
 
