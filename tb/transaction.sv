@@ -8,6 +8,7 @@ class transaction;
   bit busy;
   bit ack_err;
   
-  constraint addr_c { addr > 1; addr < 5; din > 1; din < 10; }
+
+  constraint addr_c { addr > 1; addr < 30; din > 1; din < 30; }
   constraint rd_wr_c { op dist {1:/50, 0:/50}; }
 endclass
