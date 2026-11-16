@@ -39,7 +39,7 @@ A transaction-based verification environment is developed to generate randomized
 | Data transfer | Read and Write |
 | Verification language | SystemVerilog |
 | RTL language | Verilog HDL |
-| Simulation | EDA Playground / Riviera-PRO |
+| Simulation | EDA Playground / Siemens Questa 2025.2 |
 
 ## I2C Protocol Overview
 
